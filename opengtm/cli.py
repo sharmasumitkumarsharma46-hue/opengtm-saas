@@ -6,6 +6,7 @@ Commands:
   opengtm research  - Research a domain (contact + website audit)
   opengtm qualify   - Score ICP fit for a list of leads
   opengtm message   - Generate outreach messages from audit data
+  opengtm email     - Send personalized outbound emails to leads
   opengtm pipeline  - Run full end-to-end pipeline
   opengtm outreach  - Show/manage outreach sequence queue
   opengtm sync      - Push leads to Google Sheet CRM
@@ -146,6 +147,32 @@ def cmd_message(args):
     print(f"{len(results)} messages -> {args.output}", flush=True)
 
 
+def cmd_email(args):
+    """Send personalized outbound emails to a list of leads."""
+    from .emailer import EmailConfig, send_bulk_emails, load_template
+
+    with open(args.input) as f:
+        leads = json.load(f)
+
+    body_template = load_template(args.template)
+    config = EmailConfig.from_env()
+
+    print(f"[email] Sending {len(leads)} emails (dry_run={args.dry_run})", flush=True)
+    result = send_bulk_emails(
+        leads=leads,
+        subject_template=args.subject,
+        body_template=body_template,
+        config=config,
+        dry_run=args.dry_run,
+        verbose=True,
+        delay_between_sends=args.delay,
+    )
+
+    with open(args.output, "w") as f:
+        json.dump(result, f, indent=2, ensure_ascii=False)
+    print(f"\nEmail results -> {args.output}", flush=True)
+
+
 def cmd_pipeline(args):
     """Full end-to-end pipeline: discover -> research -> qualify -> message -> sync."""
     import time
@@ -162,7 +189,6 @@ def cmd_pipeline(args):
     print(f"PIPELINE: {args.industry} | {args.region} | limit {args.limit}", flush=True)
     print(f"{'='*60}", flush=True)
 
-    # Step 1: Discover
     print(f"\nSTEP 1: DISCOVER", flush=True)
     prospects = _discover(
         industry=args.industry,
@@ -174,7 +200,6 @@ def cmd_pipeline(args):
         print("No companies discovered. Exiting.", flush=True)
         sys.exit(1)
 
-    # Step 2: Research
     print(f"\nSTEP 2: RESEARCH ({len(prospects)} companies)", flush=True)
     researched = []
     for i, p in enumerate(prospects):
@@ -197,7 +222,6 @@ def cmd_pipeline(args):
         if i < len(prospects) - 1:
             time.sleep(3)
 
-    # Step 3: Qualify
     print(f"\nSTEP 3: QUALIFY", flush=True)
     qualified = qualify_batch(
         researched,
@@ -205,7 +229,6 @@ def cmd_pipeline(args):
         verbose=True,
     )
 
-    # Step 4: Generate messages
     print(f"\nSTEP 4: GENERATE MESSAGES", flush=True)
     for lead in qualified:
         messages = generate_messages(
@@ -221,12 +244,10 @@ def cmd_pipeline(args):
         lead["messages"] = messages
         print(f"  {lead['company']}: Pattern {messages['pattern']}", flush=True)
 
-    # Save results
     with open(output_path, "w") as f:
         json.dump(qualified, f, indent=2, ensure_ascii=False)
     print(f"\nResults -> {output_path}", flush=True)
 
-    # Step 5: Sync (optional)
     if not args.no_sync and os.environ.get("CRM_WEBHOOK_URL"):
         print(f"\nSTEP 5: SYNC TO CRM", flush=True)
         sync_data = [build_sync_payload(lead) for lead in qualified]
@@ -236,7 +257,6 @@ def cmd_pipeline(args):
     else:
         print(f"\nSTEP 5: SYNC SKIPPED (CRM_WEBHOOK_URL not set)", flush=True)
 
-    # Summary
     hot = sum(1 for r in qualified if r["qualification"]["tier"] == "hot")
     warm = sum(1 for r in qualified if r["qualification"]["tier"] == "warm")
     cold = sum(1 for r in qualified if r["qualification"]["tier"] == "cold")
@@ -290,7 +310,6 @@ def cmd_sync(args):
     with open(args.input) as f:
         leads = json.load(f)
 
-    # Build sync payload
     sync_data = [build_sync_payload(lead) for lead in leads if lead.get("messages", {}).get("pattern") != "SKIP"]
     skipped = len(leads) - len(sync_data)
 
@@ -363,7 +382,6 @@ def cmd_analytics(args):
         print(f"\nResults -> {output_path}", flush=True)
 
     else:
-        # Full: both stages
         print(f"[analytics] Full analysis: {args.url} | {args.company}", flush=True)
         health = run_health_check(args.url)
         mentions = run_mentions(
@@ -487,6 +505,7 @@ Examples:
   opengtm research --domain example.com --company "Acme" --industry "SaaS"
   opengtm qualify --input discovered.json --icp-profile saas
   opengtm message --input qualified.json --language en
+  opengtm email --input qualified.json --subject "Quick idea for {company}" --template email-template.txt
   opengtm pipeline --industry "IT Services" --region "Hamburg" --limit 10
   opengtm outreach load --input qualified.json --state-file seq.json
   opengtm outreach queue --state-file seq.json
@@ -500,7 +519,6 @@ Examples:
     )
     sub = parser.add_subparsers(dest="command")
 
-    # discover
     p_disc = sub.add_parser("discover", help="Find companies via Gemini + Google Search")
     p_disc.add_argument("--industry", "-i", required=True, help="Industry (e.g. 'B2B SaaS', 'IT Services')")
     p_disc.add_argument("--region", "-r", required=True, help="City or region (e.g. 'Berlin', 'San Francisco')")
@@ -508,7 +526,6 @@ Examples:
     p_disc.add_argument("--output", "-o", default="/tmp/opengtm-discovered.json")
     p_disc.add_argument("--no-validate", action="store_true", help="Skip URL reachability check")
 
-    # research
     p_res = sub.add_parser("research", help="Research domains: extract contact + run website audit")
     p_res.add_argument("--domain", "-d", help="Single domain to research")
     p_res.add_argument("--company", "-c", help="Company name (with --domain)")
@@ -516,7 +533,6 @@ Examples:
     p_res.add_argument("--input", help="JSON file with leads [{domain, company, industry}]")
     p_res.add_argument("--output", "-o", default="/tmp/opengtm-researched.json")
 
-    # qualify
     p_qual = sub.add_parser("qualify", help="Score leads on ICP fit (0-100)")
     p_qual.add_argument("--input", required=True, help="JSON file with researched leads")
     p_qual.add_argument("--icp-profile", default="default",
@@ -524,14 +540,20 @@ Examples:
                         help="ICP profile to score against (default: default)")
     p_qual.add_argument("--output", "-o", default="/tmp/opengtm-qualified.json")
 
-    # message
     p_msg = sub.add_parser("message", help="Generate outreach messages from audit findings")
     p_msg.add_argument("--input", required=True, help="JSON file with qualified leads")
     p_msg.add_argument("--language", choices=["en", "de"], help="Message language (default: en)")
     p_msg.add_argument("--region", help="Region for peer comparison messages")
     p_msg.add_argument("--output", "-o", default="/tmp/opengtm-messages.json")
 
-    # pipeline
+    p_email = sub.add_parser("email", help="Send personalized outbound emails to leads")
+    p_email.add_argument("--input", required=True, help="JSON file with leads")
+    p_email.add_argument("--subject", required=True, help="Email subject template")
+    p_email.add_argument("--template", help="Text file with the email body template")
+    p_email.add_argument("--dry-run", action="store_true", help="Do not actually send emails")
+    p_email.add_argument("--delay", type=float, default=0.0, help="Seconds between sends (default 0)")
+    p_email.add_argument("--output", "-o", default="/tmp/opengtm-email-results.json")
+
     p_pipe = sub.add_parser("pipeline", help="Full pipeline: discover -> research -> qualify -> message -> sync")
     p_pipe.add_argument("--industry", "-i", required=True)
     p_pipe.add_argument("--region", "-r", required=True)
@@ -543,7 +565,6 @@ Examples:
     p_pipe.add_argument("--no-sync", action="store_true", help="Skip CRM sync step")
     p_pipe.add_argument("--dry-run", action="store_true", help="Do not write to CRM")
 
-    # outreach
     p_out = sub.add_parser("outreach", help="Manage multi-touch outreach sequences")
     p_out.add_argument("action", choices=["load", "queue", "status"],
                        help="load: add leads | queue: show due today | status: stats")
@@ -554,12 +575,10 @@ Examples:
     p_out.add_argument("--daily-limit", type=int, default=DEFAULT_DAILY_LIMIT,
                        help=f"Max connection requests per day (default: {DEFAULT_DAILY_LIMIT})")
 
-    # sync
     p_sync = sub.add_parser("sync", help="Sync leads to Google Sheet CRM via webhook")
     p_sync.add_argument("--input", required=True, help="JSON file with generated leads")
     p_sync.add_argument("--dry-run", action="store_true", help="Print without posting")
 
-    # context
     p_ctx = sub.add_parser("context", help="Extract company context from a URL")
     p_ctx.add_argument("--url", "-u", required=True, help="Company website URL")
     p_ctx.add_argument("--output", "-o", help="Output JSON path (default: /tmp/opengtm-context.json)")
@@ -567,7 +586,6 @@ Examples:
     p_ctx.add_argument("--language", help="Target market language (e.g. 'de', 'en')")
     p_ctx.add_argument("--strict", action="store_true", help="Raise error instead of falling back on API failure")
 
-    # analytics
     p_anl = sub.add_parser("analytics", help="AEO health check (29 checks) + AI visibility")
     p_anl.add_argument("--url", "-u", help="Company website URL")
     p_anl.add_argument("--company", "-c", help="Company name (for mentions check)")
@@ -576,7 +594,6 @@ Examples:
     p_anl.add_argument("--mentions-only", action="store_true", help="Run mentions check only")
     p_anl.add_argument("--output", "-o", help="Output JSON path (default: /tmp/opengtm-analytics.json)")
 
-    # blog
     p_blog = sub.add_parser("blog", help="Generate a blog article with Gemini + Google Search")
     p_blog.add_argument("--domain", "-d", required=True, help="Company website domain or URL")
     p_blog.add_argument("--keyword", "-k", required=True, help="Primary SEO keyword")
@@ -587,7 +604,6 @@ Examples:
     p_blog.add_argument("--verify-urls", action="store_true", help="Verify all links in article")
     p_blog.add_argument("--output", "-o", help="Output JSON path (default: /tmp/opengtm-blog.json)")
 
-    # keywords
     p_kw = sub.add_parser("keywords", help="Research SEO keywords (7-stage AI pipeline)")
     p_kw.add_argument("--domain", "-d", required=True, help="Company website domain or URL")
     p_kw.add_argument("--context", help="JSON file with company context (from opengtm context)")
@@ -599,7 +615,6 @@ Examples:
     p_kw.add_argument("--no-briefs", action="store_true", help="Skip content brief generation")
     p_kw.add_argument("--output", "-o", help="Output JSON path (default: /tmp/opengtm-keywords.json)")
 
-    # sitemap
     p_sm = sub.add_parser("sitemap", help="Crawl and classify sitemap URLs by type")
     p_sm.add_argument("--url", "-u", required=True, help="Company website URL")
     p_sm.add_argument("--validate", action="store_true", help="Validate each URL with HEAD request")
@@ -617,6 +632,7 @@ Examples:
         "research": cmd_research,
         "qualify": cmd_qualify,
         "message": cmd_message,
+        "email": cmd_email,
         "pipeline": cmd_pipeline,
         "outreach": cmd_outreach,
         "sync": cmd_sync,
@@ -629,6 +645,5 @@ Examples:
     dispatch[args.command](args)
 
 
-# Allow running as: python -m opengtm
 if __name__ == "__main__":
     main()
